@@ -15,24 +15,24 @@ class VirtualTutor:
         schema, action = self.manager.select({"stage": self.stage, "vad": vad, "flags": {"bored": bored, "success": success}})
 
         topic = meta.get("topic")
+        kickoff = meta.get("kickoff")  # "warmup" | None
         force_roleplay = bool(meta.get("force_roleplay"))
+
+        if kickoff == "warmup":
+            action = "contextual_smalltalk"
+
+        if force_roleplay:
+            action = "set_scene_and_goal"
 
         sys = {"role": "system", "content": open("src/core/prompts/system_base.md", "r", encoding="utf-8").read()}
         instr = ACTION_PRESETS.get(action, "")
-
-        # усиливаем инструкцию темой, если есть
         if topic:
             instr = f"Topic: {topic}\n{instr}"
-
-        # по команде - принудительно сцена
-        if force_roleplay:
-            action = "set_scene_and_goal"
-            instr = f"Topic: {topic or 'General'}\nStart a 3–5 min roleplay. Set the scene in one sentence, define the goal, then ask the student to begin."
 
         messages = [
             sys,
             {"role": "user", "content": f"Student says: {user_text}"},
-            {"role": "system", "content": f"Active schema: {schema}. Action: {action}. Instruction: {instr}"}
+            {"role": "system", "content": f"Active schema/action hint: {action}. Instruction:\n{instr}"}
         ]
         answer = await self.llm.chat(messages)
         self._update_stage(success, bored)

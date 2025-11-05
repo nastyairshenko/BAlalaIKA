@@ -2,98 +2,131 @@ import asyncio
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, BotCommand
 from aiogram.filters import Command, CommandStart
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 from src.core.config import Cfg
 from src.tutor.virtual_tutor import VirtualTutor
 from src.tutor.emotion_fusion import fuse
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
-analyzer = SentimentIntensityAnalyzer()
 bot = Bot(Cfg.TG_TOKEN)
 dp = Dispatcher()
-
-# простая «память» тем по пользователям (в проде — БД/кэш)
-user_topics: dict[int, str] = {}
-# при желании можно хранить тут и по инстансу тьютора на пользователя
 tutor = VirtualTutor()
+analyzer = SentimentIntensityAnalyzer()
 
-# ---------- Команды ----------
+# простая «память»
+user_topics: dict[int, str] = {}
+pending_topic: set[int] = set()
+
+def looks_like_topic(text: str) -> bool:
+    """очень простая эвристика: короткая фраза без пунктуации → вероятно тема"""
+    t = text.strip()
+    return len(t.split()) <= 3 and all(ch.isalnum() or ch.isspace() for ch in t)
 
 @dp.message(CommandStart())
-async def cmd_start(msg: Message):
-    await msg.answer(
-        "Привет! Я тьютор разговорного английского.\n"
-        "Отправь /topic <тема> — о чём хочешь поговорить.\n"
-        "Например: /topic travel to Japan"
-    )
+async def cmd_start(m: Message):
+    await bot.set_my_commands([
+        BotCommand(command="start",    description="Приветствие"),
+        BotCommand(command="help",     description="Подсказка"),
+        BotCommand(command="topic",    description="Задать тему разговора"),
+        BotCommand(command="roleplay", description="Ролевая сцена по теме"),
+        BotCommand(command="cancel",   description="Отмена шага"),
+    ])
+    pending_topic.add(m.from_user.id)
+    await m.answer("Привет! На какую тему поговорим? Напиши одним-двумя словами, например: coffee shop / job interview / travel")
 
 @dp.message(Command("help"))
-async def cmd_help(msg: Message):
-    await msg.answer(
-        "/topic <тема> — задать тему разговора\n"
-        "/roleplay — начать ролевую сцену по заданной теме\n"
-        "/cancel — отменить текущий шаг\n"
-        "Потом просто пиши сообщения — будем практиковаться 🙂"
-    )
+async def cmd_help(m: Message):
+    await m.answer("Напиши тему одним словом (напр. *coffee shop*) — или используй /topic <тема>. Потом просто общайся, я буду мягко корректировать и задавать вопросы.")
 
 @dp.message(Command("topic"))
-async def cmd_topic(msg: Message):
-    # аргументы после названия команды
-    args = msg.text.split(maxsplit=1)
+async def cmd_topic(m: Message):
+    uid = m.from_user.id
+    args = m.text.split(maxsplit=1)
     if len(args) == 1 or not args[1].strip():
-        await msg.reply("Укажи тему: /topic job interview, /topic travel, /topic coffee shop …")
+        pending_topic.add(uid)
+        await m.answer("Окей! Напиши следующим сообщением тему (например: coffee shop).")
         return
     topic = args[1].strip()
-    user_topics[msg.from_user.id] = topic
-    await msg.answer(f"Тема установлена: «{topic}». Напиши сообщение — начнём разговор.")
+    user_topics[uid] = topic
+    pending_topic.discard(uid)
+    # сразу разогрев по теме
+    seed = f"Warm-up on topic: {topic}. Ask 1–2 engaging questions to start speaking."
+    score = analyzer.polarity_scores(seed)["compound"]
+    vad = fuse(text_sentiment=score, prosody_energy=None, vlm_label=None).tolist()
+    answer = await tutor.reply(seed, vad, meta={"topic": topic, "kickoff": "warmup"})
+    await m.answer(answer)
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(m: Message):
+    uid = m.from_user.id
+    user_topics.pop(uid, None)
+    pending_topic.discard(uid)
+    await m.answer("Ок, отменил. На какую тему поговорим? (например: travel, coffee shop)")
 
 @dp.message(Command("roleplay"))
-async def cmd_roleplay(msg: Message):
-    topic = user_topics.get(msg.from_user.id)
+async def cmd_roleplay(m: Message):
+    uid = m.from_user.id
+    topic = user_topics.get(uid)
     if not topic:
-        await msg.answer("Сначала задай тему: /topic <тема>")
+        pending_topic.add(uid)
+        await m.answer("Сначала укажи тему: напиши её одним словом или используй /topic <тема>.")
         return
     seed = f"Let's start a short roleplay about: {topic}. You start."
     score = analyzer.polarity_scores(seed)["compound"]
     vad = fuse(text_sentiment=score, prosody_energy=None, vlm_label=None).tolist()
-
     answer = await tutor.reply(seed, vad, meta={"topic": topic, "force_roleplay": True})
-    await msg.answer(answer)
-
-
-@dp.message(Command("cancel"))
-async def cmd_cancel(msg: Message):
-    # минимальный сброс — только тема (при желании сбрасывайте и состояние тьютора)
-    user_topics.pop(msg.from_user.id, None)
-    await msg.answer("Отменил текущий шаг. Задай новую тему: /topic <тема>")
-
-# ---------- Обычные сообщения ----------
+    await m.answer(answer)
 
 @dp.message(F.text)
-async def handle_text(msg: Message):
-    # анализ тональности текста → Valence
-    score = analyzer.polarity_scores(msg.text)["compound"]  # [-1..1]
-    vad = fuse(text_sentiment=score, prosody_energy=None, vlm_label=None).tolist()
+async def on_text(m: Message):
+    uid = m.from_user.id
+    txt = m.text.strip()
 
-    topic = user_topics.get(msg.from_user.id)
-    if not topic:
-        await msg.reply("Сначала задай тему: /topic <тема>. Например: /topic coffee shop")
+    # если ждём тему — примем это сообщение как тему
+    if uid in pending_topic or (uid not in user_topics and looks_like_topic(txt)):
+        user_topics[uid] = txt
+        pending_topic.discard(uid)
+        seed = f"Warm-up on topic: {txt}. Ask 1–2 engaging questions to start speaking."
+        score = analyzer.polarity_scores(seed)["compound"]
+        vad = fuse(text_sentiment=score, prosody_energy=None, vlm_label=None).tolist()
+        answer = await tutor.reply(seed, vad, meta={"topic": txt, "kickoff": "warmup"})
+        await m.answer(f"Тема установлена: «{txt}».")
+        await m.answer(answer)
         return
 
-    answer = await tutor.reply(msg.text, vad, meta={"topic": topic})
-    await msg.reply(answer)
+    topic = user_topics.get(uid)
+    if not topic:
+        pending_topic.add(uid)
+        await m.reply("Сначала выберем тему. Напиши одним-двумя словами: *coffee shop*, *travel*, *job interview* …")
+        return
 
-# ---------- Регистрация меню и запуск ----------
+    # обычный ход занятия: анализируем тональность и отвечаем
+    score = analyzer.polarity_scores(txt)["compound"]  # [-1..1]
+    vad = fuse(text_sentiment=score, prosody_energy=None, vlm_label=None).tolist()
+    answer = await tutor.reply(txt, vad, meta={"topic": topic})
+    await m.reply(answer)
 
 async def main():
-    # Меню команд в Telegram (one source of truth — прямо в коде)
-    await bot.set_my_commands([
-        BotCommand(command="start",    description="Запуск и приветствие"),
-        BotCommand(command="help",     description="Подсказка по командам"),
-        BotCommand(command="topic",    description="Задать тему разговора"),
-        BotCommand(command="roleplay", description="Ролевая сцена по теме"),
-        BotCommand(command="cancel",   description="Отмена текущего шага"),
-    ])
+    if not Cfg.TG_TOKEN:
+        raise RuntimeError("TG_BOT_TOKEN не найден. Создай .env в корне и укажи TG_BOT_TOKEN=...")
+    from aiogram.types import BotCommand
+    from aiogram.types import BotCommandScopeDefault, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats
+
+    await bot.set_my_commands(
+        commands=[
+            BotCommand(command="start", description="Начни свой разговор с учителем!"),
+            BotCommand(command="help", description="Подсказка"),
+            BotCommand(command="topic", description="Задать тему разговора"),
+            BotCommand(command="roleplay", description="Ролевая сцена"),
+            BotCommand(command="cancel", description="Отмена шага"),
+        ],
+        scope=BotCommandScopeDefault(),  # глобально для всех чатов
+        language_code="ru"  # локаль (можно убрать)
+    )
+
+    # (опционально) задать отдельно для личек и групп:
+    await bot.set_my_commands([...], scope=BotCommandScopeAllPrivateChats(), language_code="ru")
+    await bot.set_my_commands([...], scope=BotCommandScopeAllGroupChats(), language_code="ru")
     print("Bot started")
     await dp.start_polling(bot, skip_updates=True)
 

@@ -2,7 +2,7 @@
 python -m venv .venv && .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 copy .env.example .env  # заполните TG_BOT_TOKEN и LLM_API_KEY
-python -m src.bot.tg_bot
+python -m src.bot.tg_bot - запуск бота 
 
 2) Команды:
  /start /help /topic <тема> /roleplay /cancel
