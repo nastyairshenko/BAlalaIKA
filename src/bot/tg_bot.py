@@ -106,27 +106,52 @@ async def on_text(m: Message):
     answer = await tutor.reply(txt, vad, meta={"topic": topic})
     await m.reply(answer)
 
+from aiogram.types import BotCommand
+from aiogram.types import (
+    BotCommandScopeDefault,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeAllGroupChats,
+)
+
 async def main():
     if not Cfg.TG_TOKEN:
-        raise RuntimeError("TG_BOT_TOKEN не найден. Создай .env в корне и укажи TG_BOT_TOKEN=...")
-    from aiogram.types import BotCommand
-    from aiogram.types import BotCommandScopeDefault, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats
+        raise RuntimeError("TG_BOT_TOKEN не найден")
 
+    # 1) Глобальный список по умолчанию
     await bot.set_my_commands(
-        commands=[
-            BotCommand(command="start", description="Начни свой разговор с учителем!"),
-            BotCommand(command="help", description="Подсказка"),
-            BotCommand(command="topic", description="Задать тему разговора"),
-            BotCommand(command="roleplay", description="Ролевая сцена"),
-            BotCommand(command="cancel", description="Отмена шага"),
+        [
+            BotCommand(command="start",    description="Приветствие"),
+            BotCommand(command="help",     description="Подсказка"),
+            BotCommand(command="topic",    description="Задать тему разговора"),
+            BotCommand(command="roleplay", description="Ролевая сцена по теме"),
+            BotCommand(command="cancel",   description="Отмена шага"),
         ],
-        scope=BotCommandScopeDefault(),  # глобально для всех чатов
-        language_code="ru"  # локаль (можно убрать)
+        scope=BotCommandScopeDefault(),
+        # Совет: временно уберите language_code, чтобы не промахнуться с локалью
+        # language_code="ru",
     )
 
-    # (опционально) задать отдельно для личек и групп:
-    await bot.set_my_commands([...], scope=BotCommandScopeAllPrivateChats(), language_code="ru")
-    await bot.set_my_commands([...], scope=BotCommandScopeAllGroupChats(), language_code="ru")
+    # 2) (опционально) отдельные списки для личек и групп
+    await bot.set_my_commands(
+        [
+            BotCommand(command="start",  description="Приветствие"),
+            BotCommand(command="topic",  description="Задать тему"),
+            BotCommand(command="cancel", description="Отмена"),
+        ],
+        scope=BotCommandScopeAllPrivateChats(),
+    )
+    await bot.set_my_commands(
+        [
+            BotCommand(command="help",   description="Что умеет бот"),
+            BotCommand(command="cancel", description="Сброс"),
+        ],
+        scope=BotCommandScopeAllGroupChats(),
+    )
+
+    # 3) Проверим, что реально установилось
+    cmds = await bot.get_my_commands()
+    print("Commands now:", [(c.command, c.description) for c in cmds])
+
     print("Bot started")
     await dp.start_polling(bot, skip_updates=True)
 
